@@ -1,416 +1,353 @@
-<!--
-Source: https://github.com/mukul975/Anthropic-Cybersecurity-Skills
-Author: mahipal
-License: Apache 2.0 (Copyright 2026 mukul975)
-Copied verbatim for local supply-chain safety. No modifications.
--->
 ---
 name: implementing-api-security-posture-management
-description: Implement API Security Posture Management to continuously discover, classify, and score APIs based on risk while
-  enforcing security policies across the API lifecycle.
+description: Continuously discover, classify, and risk-score APIs across an organization. Enforces security policies, detects shadow APIs and configuration drift, and produces posture dashboards aligned to NIST CSF.
 domain: cybersecurity
 subdomain: api-security
 tags:
 - api-security
-- aspm
-- api-posture-management
+- posture-management
 - api-discovery
 - risk-scoring
 - api-governance
 - continuous-monitoring
-- api-inventory
-version: '1.0'
-author: mahipal
-license: Apache-2.0
-nist_csf:
-- PR.PS-01
-- ID.RA-01
-- PR.DS-10
-- DE.CM-01
+version: 1.0.0
 ---
 
 # Implementing API Security Posture Management
 
 ## Overview
 
-API Security Posture Management (API-SPM) provides continuous visibility into an organization's API attack surface by automatically discovering, classifying, and risk-scoring all APIs including internal, external, partner, and shadow endpoints. Unlike point-in-time testing tools, API-SPM operates continuously to detect configuration drift, policy violations, missing security controls, sensitive data exposure, and compliance gaps. It aggregates findings from DAST, SAST, SCA, and runtime monitoring tools to provide a unified view of API risk posture across the organization.
+API Security Posture Management (API-SPM) provides continuous visibility into an organization's entire API attack surface — internal, external, partner, and shadow endpoints. Unlike point-in-time penetration tests, API-SPM runs continuously to detect new shadow APIs, configuration drift, policy violations, missing security controls, and sensitive data exposure.
 
+It aggregates signals from DAST, SAST, SCA, and runtime traffic analysis to produce a unified, scored view of API risk across the organization.
 
 ## When to Use
 
-- When deploying or configuring implementing api security posture management capabilities in your environment
-- When establishing security controls aligned to compliance requirements
-- When building or improving security architecture for this domain
-- When conducting security assessments that require this implementation
+- Standing up or maturing an API security governance program
+- Needing a real-time inventory of all APIs (including undocumented ones)
+- Enforcing consistent security policy across hundreds of microservice APIs
+- Demonstrating compliance posture for SOC 2, ISO 27001, or PCI-DSS audits
+- Detecting shadow or deprecated APIs before attackers do
 
 ## Prerequisites
 
-- API gateway with traffic logging (Kong, AWS API Gateway, Apigee, Envoy)
-- OpenAPI specifications for documented APIs
-- SIEM or log aggregation platform (Splunk, Elastic)
-- CI/CD pipeline access for shift-left integration
-- Cloud provider APIs for infrastructure discovery
-- Python 3.8+ for custom posture assessment tooling
+- API gateway with traffic logging enabled (Kong, AWS API Gateway, Apigee, Envoy)
+- OpenAPI specifications for all documented APIs (or a plan to generate them)
+- SIEM or log aggregation (Splunk, Elastic) for runtime traffic analysis
+- CI/CD pipeline access for shift-left API inventory integration
+- Python 3.8+ for posture engine tooling
 
 ## Core Components
 
-### 1. API Discovery and Inventory
+### 1. API Discovery and Inventory Engine
 
 ```python
 #!/usr/bin/env python3
-"""API Security Posture Management Engine
-
-Continuously discovers, classifies, and risk-scores APIs
-to maintain a comprehensive security posture inventory.
+"""
+API Security Posture Management Engine
+Discovers, classifies, and risk-scores all API endpoints continuously.
 """
 
-import json
-import re
-import hashlib
-from datetime import datetime, timedelta
+import json, re, hashlib
+from datetime import datetime
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
-class APIClassification(Enum):
-    EXTERNAL = "external"
-    INTERNAL = "internal"
-    PARTNER = "partner"
-    SHADOW = "shadow"
+class Classification(Enum):
+    EXTERNAL   = "external"
+    INTERNAL   = "internal"
+    PARTNER    = "partner"
+    SHADOW     = "shadow"      # discovered but undocumented
     DEPRECATED = "deprecated"
 
-class RiskLevel(Enum):
+class Risk(Enum):
     CRITICAL = 4
-    HIGH = 3
-    MEDIUM = 2
-    LOW = 1
-    INFO = 0
+    HIGH     = 3
+    MEDIUM   = 2
+    LOW      = 1
 
 @dataclass
-class SecurityControl:
-    name: str
-    present: bool
+class Control:
+    name:     str
+    present:  bool
     required: bool
-    severity: RiskLevel
-    details: str = ""
+    severity: Risk
+    detail:   str = ""
 
 @dataclass
-class APIEndpoint:
-    api_id: str
-    method: str
-    path: str
-    service_name: str
-    classification: APIClassification
-    owner: Optional[str] = None
-    version: Optional[str] = None
-    first_discovered: str = ""
-    last_seen: str = ""
-    documented: bool = False
-    security_controls: List[SecurityControl] = field(default_factory=list)
-    risk_score: float = 0.0
-    sensitive_data_types: Set[str] = field(default_factory=set)
-    compliance_tags: Set[str] = field(default_factory=set)
-    traffic_volume_daily: int = 0
+class Endpoint:
+    api_id:           str
+    method:           str
+    path:             str
+    service:          str
+    classification:   Classification
+    owner:            Optional[str] = None
+    documented:       bool = False
+    first_seen:       str  = ""
+    last_seen:        str  = ""
+    controls:         List[Control] = field(default_factory=list)
+    risk_score:       float = 0.0
+    sensitive_types:  Set[str] = field(default_factory=set)
+    compliance_tags:  Set[str] = field(default_factory=set)
+    daily_requests:   int = 0
 
-class APIPostureManager:
-    SENSITIVE_PATTERNS = {
-        "ssn": re.compile(r'\b\d{3}-\d{2}-\d{4}\b'),
-        "credit_card": re.compile(r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
-        "email": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
-        "api_key": re.compile(r'\b[A-Za-z0-9]{32,}\b'),
-        "jwt": re.compile(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'),
-        "phone": re.compile(r'\b\+?1?\d{10,15}\b'),
+class PostureManager:
+
+    SENSITIVE = {
+        "ssn":         re.compile(r'\b\d{3}-\d{2}-\d{4}\b'),
+        "credit_card": re.compile(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'),
+        "email":       re.compile(r'\b[\w.+-]+@[\w-]+\.[a-z]{2,}\b', re.I),
+        "jwt":         re.compile(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'),
+        "api_key":     re.compile(r'\b[A-Za-z0-9]{32,}\b'),
     }
 
     def __init__(self):
-        self.inventory: Dict[str, APIEndpoint] = {}
-        self.policy_rules: List[dict] = []
+        self.inventory: Dict[str, Endpoint] = {}
 
-    def generate_api_id(self, method: str, path: str, service: str) -> str:
-        raw = f"{service}:{method}:{path}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    def _id(self, method: str, path: str, service: str) -> str:
+        return hashlib.sha256(f"{service}:{method}:{path}".encode()).hexdigest()[:16]
 
-    def register_api(self, method: str, path: str, service_name: str,
-                     classification: APIClassification,
-                     documented: bool = False, owner: str = None) -> APIEndpoint:
-        api_id = self.generate_api_id(method, path, service_name)
+    def register(self, method: str, path: str, service: str,
+                 classification: Classification, documented: bool = False,
+                 owner: str = None) -> Endpoint:
+        eid = self._id(method, path, service)
         now = datetime.now().isoformat()
+        if eid in self.inventory:
+            self.inventory[eid].last_seen = now
+            return self.inventory[eid]
+        ep = Endpoint(api_id=eid, method=method, path=path, service=service,
+                      classification=classification, owner=owner,
+                      documented=documented, first_seen=now, last_seen=now)
+        self.inventory[eid] = ep
+        return ep
 
-        if api_id in self.inventory:
-            endpoint = self.inventory[api_id]
-            endpoint.last_seen = now
-            return endpoint
+    def assess_controls(self, ep: Endpoint, traffic: dict) -> List[Control]:
+        req_hdrs  = traffic.get("request_headers", {})
+        resp_hdrs = traffic.get("response_headers", {})
+        controls  = []
 
-        endpoint = APIEndpoint(
-            api_id=api_id,
-            method=method,
-            path=path,
-            service_name=service_name,
-            classification=classification,
-            owner=owner,
-            first_discovered=now,
-            last_seen=now,
-            documented=documented
-        )
-        self.inventory[api_id] = endpoint
-        return endpoint
+        # Authentication
+        has_auth = any(h in req_hdrs for h in ["Authorization","X-API-Key","Cookie"])
+        controls.append(Control("authentication", has_auth, True, Risk.CRITICAL,
+            "" if has_auth else "No authentication mechanism detected"))
 
-    def assess_security_controls(self, endpoint: APIEndpoint,
-                                  traffic_sample: dict) -> List[SecurityControl]:
-        """Evaluate security controls present on an API endpoint."""
-        controls = []
+        # TLS
+        is_https = traffic.get("scheme","").lower() == "https"
+        controls.append(Control("tls", is_https, True, Risk.CRITICAL,
+            "" if is_https else "Endpoint reachable over plain HTTP"))
 
-        # Authentication check
-        has_auth = any(h in traffic_sample.get('request_headers', {})
-                      for h in ['Authorization', 'X-API-Key', 'Cookie'])
-        controls.append(SecurityControl(
-            name="authentication",
-            present=has_auth,
-            required=True,
-            severity=RiskLevel.CRITICAL,
-            details="No authentication mechanism detected" if not has_auth else "Authentication present"
-        ))
+        # Rate limiting
+        has_rl = any(h.startswith("X-RateLimit") or h == "Retry-After"
+                     for h in resp_hdrs)
+        controls.append(Control("rate_limiting", has_rl, True, Risk.HIGH,
+            "" if has_rl else "No rate-limit headers detected"))
 
-        # TLS/HTTPS check
-        is_https = traffic_sample.get('scheme', '').lower() == 'https'
-        controls.append(SecurityControl(
-            name="transport_encryption",
-            present=is_https,
-            required=True,
-            severity=RiskLevel.CRITICAL,
-            details="API accessible over HTTP without TLS" if not is_https else "HTTPS enforced"
-        ))
-
-        # Rate limiting check
-        has_rate_limit = any(h.startswith('X-RateLimit') or h == 'Retry-After'
-                           for h in traffic_sample.get('response_headers', {}).keys())
-        controls.append(SecurityControl(
-            name="rate_limiting",
-            present=has_rate_limit,
-            required=True,
-            severity=RiskLevel.HIGH,
-            details="No rate limiting headers detected" if not has_rate_limit else "Rate limiting active"
-        ))
-
-        # CORS policy check
-        cors_origin = traffic_sample.get('response_headers', {}).get('Access-Control-Allow-Origin', '')
-        has_strict_cors = cors_origin and cors_origin != '*'
-        controls.append(SecurityControl(
-            name="cors_policy",
-            present=has_strict_cors,
-            required=endpoint.classification == APIClassification.EXTERNAL,
-            severity=RiskLevel.HIGH if cors_origin == '*' else RiskLevel.MEDIUM,
-            details=f"CORS origin: {cors_origin}" if cors_origin else "No CORS headers"
-        ))
+        # CORS
+        origin = resp_hdrs.get("Access-Control-Allow-Origin", "")
+        strict_cors = bool(origin) and origin != "*"
+        controls.append(Control("cors", strict_cors,
+            ep.classification == Classification.EXTERNAL,
+            Risk.HIGH if origin == "*" else Risk.MEDIUM,
+            f"CORS origin: {origin}" if origin else "No CORS headers"))
 
         # Security headers
-        sec_headers = traffic_sample.get('response_headers', {})
-        required_headers = {
-            'X-Content-Type-Options': 'nosniff',
-            'Strict-Transport-Security': None,
-            'X-Frame-Options': None,
-            'Cache-Control': 'no-store',
-        }
-        missing = [h for h in required_headers if h not in sec_headers]
-        controls.append(SecurityControl(
-            name="security_headers",
-            present=len(missing) == 0,
-            required=True,
-            severity=RiskLevel.MEDIUM,
-            details=f"Missing headers: {', '.join(missing)}" if missing else "All security headers present"
-        ))
+        required = ["X-Content-Type-Options","Strict-Transport-Security",
+                    "X-Frame-Options","Cache-Control"]
+        missing = [h for h in required if h not in resp_hdrs]
+        controls.append(Control("security_headers", not missing, True, Risk.MEDIUM,
+            f"Missing: {', '.join(missing)}" if missing else "All required headers present"))
 
-        # Input validation (check for schema validation errors in logs)
-        has_validation = traffic_sample.get('has_schema_validation', False)
-        controls.append(SecurityControl(
-            name="input_validation",
-            present=has_validation,
-            required=True,
-            severity=RiskLevel.HIGH,
-            details="No schema validation detected" if not has_validation else "Input validation active"
-        ))
+        # Input validation
+        has_validation = traffic.get("has_schema_validation", False)
+        controls.append(Control("input_validation", has_validation, True, Risk.HIGH,
+            "" if has_validation else "No schema validation detected in logs"))
 
-        endpoint.security_controls = controls
+        ep.controls = controls
         return controls
 
-    def calculate_risk_score(self, endpoint: APIEndpoint) -> float:
-        """Calculate a composite risk score (0-100) for an API endpoint."""
-        score = 0.0
-        max_score = 0.0
+    def score(self, ep: Endpoint) -> float:
+        raw, max_raw = 0.0, 0.0
+        for c in ep.controls:
+            w = c.severity.value * 5
+            max_raw += w
+            if not c.present and c.required:
+                raw += w
+        multiplier = {
+            Classification.EXTERNAL:   1.5,
+            Classification.PARTNER:    1.3,
+            Classification.SHADOW:     2.0,
+            Classification.DEPRECATED: 1.8,
+            Classification.INTERNAL:   1.0,
+        }.get(ep.classification, 1.0)
+        if not ep.documented:
+            raw += 10
+        raw += len(ep.sensitive_types) * 5
+        ep.risk_score = round(min(100, (raw / max_raw * 100 * multiplier)) if max_raw else 0, 1)
+        return ep.risk_score
 
-        # Security controls scoring
-        for control in endpoint.security_controls:
-            weight = control.severity.value * 5
-            max_score += weight
-            if not control.present and control.required:
-                score += weight
-
-        # Classification risk multiplier
-        classification_weights = {
-            APIClassification.EXTERNAL: 1.5,
-            APIClassification.PARTNER: 1.3,
-            APIClassification.SHADOW: 2.0,
-            APIClassification.DEPRECATED: 1.8,
-            APIClassification.INTERNAL: 1.0,
-        }
-        multiplier = classification_weights.get(endpoint.classification, 1.0)
-
-        # Documentation penalty
-        if not endpoint.documented:
-            score += 10
-
-        # Sensitive data penalty
-        score += len(endpoint.sensitive_data_types) * 5
-
-        # Normalize to 0-100
-        if max_score > 0:
-            normalized = min(100, (score / max_score) * 100 * multiplier)
-        else:
-            normalized = 0
-
-        endpoint.risk_score = round(normalized, 1)
-        return endpoint.risk_score
-
-    def generate_posture_report(self) -> dict:
-        """Generate organization-wide API security posture report."""
+    def posture_report(self) -> dict:
         total = len(self.inventory)
-        if total == 0:
-            return {"error": "No APIs in inventory"}
+        if not total:
+            return {"error": "Inventory empty"}
+        dist  = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        cl_ct = {c.value: 0 for c in Classification}
+        undoc = missing_auth = missing_tls = 0
 
-        risk_distribution = {level.name: 0 for level in RiskLevel}
-        classification_counts = {c.value: 0 for c in APIClassification}
-        undocumented = 0
-        missing_auth = 0
-        missing_tls = 0
+        for ep in self.inventory.values():
+            self.score(ep)
+            s = ep.risk_score
+            if s >= 75:   dist["CRITICAL"] += 1
+            elif s >= 50: dist["HIGH"]     += 1
+            elif s >= 25: dist["MEDIUM"]   += 1
+            else:         dist["LOW"]      += 1
+            cl_ct[ep.classification.value] += 1
+            if not ep.documented: undoc += 1
+            for c in ep.controls:
+                if c.name == "authentication"    and not c.present: missing_auth += 1
+                if c.name == "tls"               and not c.present: missing_tls  += 1
 
-        for endpoint in self.inventory.values():
-            self.calculate_risk_score(endpoint)
-
-            if endpoint.risk_score >= 75:
-                risk_distribution["CRITICAL"] += 1
-            elif endpoint.risk_score >= 50:
-                risk_distribution["HIGH"] += 1
-            elif endpoint.risk_score >= 25:
-                risk_distribution["MEDIUM"] += 1
-            else:
-                risk_distribution["LOW"] += 1
-
-            classification_counts[endpoint.classification.value] += 1
-
-            if not endpoint.documented:
-                undocumented += 1
-
-            for control in endpoint.security_controls:
-                if control.name == "authentication" and not control.present:
-                    missing_auth += 1
-                if control.name == "transport_encryption" and not control.present:
-                    missing_tls += 1
-
-        avg_risk = sum(e.risk_score for e in self.inventory.values()) / total
-
+        avg = sum(e.risk_score for e in self.inventory.values()) / total
         return {
-            "report_date": datetime.now().isoformat(),
-            "total_apis": total,
-            "average_risk_score": round(avg_risk, 1),
-            "risk_distribution": risk_distribution,
-            "classification": classification_counts,
-            "undocumented_apis": undocumented,
-            "missing_authentication": missing_auth,
-            "missing_tls": missing_tls,
+            "report_date":        datetime.now().isoformat(),
+            "total_apis":         total,
+            "average_risk_score": round(avg, 1),
+            "risk_distribution":  dist,
+            "classification":     cl_ct,
+            "undocumented":       undoc,
+            "missing_auth":       missing_auth,
+            "missing_tls":        missing_tls,
             "top_risks": sorted(
                 [{"api_id": e.api_id, "method": e.method, "path": e.path,
-                  "service": e.service_name, "risk_score": e.risk_score,
+                  "service": e.service, "risk_score": e.risk_score,
                   "classification": e.classification.value}
                  for e in self.inventory.values()],
-                key=lambda x: x["risk_score"],
-                reverse=True
-            )[:20]
+                key=lambda x: x["risk_score"], reverse=True
+            )[:20],
         }
 ```
 
-### 2. Policy Enforcement
+### 2. Policy Definitions
 
-Define and enforce security policies across all APIs:
+Codify organization-wide API security requirements as machine-readable policies:
 
 ```yaml
 # api-security-policies.yaml
 policies:
+
   - name: require-authentication
-    description: All external APIs must require authentication
-    scope:
-      classification: [external, partner]
-    rule:
-      control: authentication
-      required: true
+    description: All external and partner APIs must enforce authentication
+    scope: [external, partner]
+    control: authentication
     severity: critical
-    remediation: "Add OAuth2, API key, or JWT authentication"
+    remediation: "Implement OAuth 2.0, JWT Bearer, or API key authentication"
 
   - name: enforce-tls
-    description: All APIs must use HTTPS
-    scope:
-      classification: [external, internal, partner]
-    rule:
-      control: transport_encryption
-      required: true
+    description: All APIs must be served over HTTPS
+    scope: [external, internal, partner]
+    control: tls
     severity: critical
-    remediation: "Configure TLS certificates and redirect HTTP to HTTPS"
+    remediation: "Provision TLS certificate; configure HTTP→HTTPS redirect"
 
-  - name: require-rate-limiting
-    description: External APIs must implement rate limiting
-    scope:
-      classification: [external]
-    rule:
-      control: rate_limiting
-      required: true
+  - name: rate-limiting-required
+    description: External APIs must return rate-limit headers
+    scope: [external]
+    control: rate_limiting
     severity: high
-    remediation: "Configure rate limiting at API gateway level"
+    remediation: "Configure rate limiting at API gateway; return X-RateLimit-* headers"
 
   - name: no-wildcard-cors
-    description: APIs must not use wildcard CORS origins
-    scope:
-      classification: [external]
-    rule:
-      control: cors_policy
-      condition: "origin != '*'"
+    description: CORS must not use wildcard origin on credentialed endpoints
+    scope: [external]
+    control: cors
+    condition: "origin != '*'"
     severity: high
-    remediation: "Specify explicit allowed origins in CORS configuration"
+    remediation: "Replace Access-Control-Allow-Origin: * with an explicit allowlist"
 
-  - name: documentation-required
-    description: All APIs must have OpenAPI documentation
-    scope:
-      classification: [external, partner]
-    rule:
-      documented: true
+  - name: openapi-required
+    description: All external and partner APIs must have OpenAPI documentation
+    scope: [external, partner]
+    check: documented == true
     severity: medium
-    remediation: "Create and publish OpenAPI specification"
+    remediation: "Generate and publish OpenAPI 3.x specification"
 
   - name: deprecation-sunset
-    description: Deprecated APIs must have sunset headers
-    scope:
-      classification: [deprecated]
-    rule:
-      header_present: "Sunset"
+    description: Deprecated APIs must declare a Sunset date via HTTP header
+    scope: [deprecated]
+    check: "Sunset header present"
     severity: medium
-    remediation: "Add Sunset header with planned removal date"
+    remediation: "Add `Sunset: <RFC 7231 date>` header to all deprecated endpoints"
 ```
 
-## Continuous Monitoring Dashboard Metrics
+### 3. Continuous Monitoring — Key Dashboard Metrics
 
-| Metric | Description | Target |
-|--------|------------|--------|
-| API Discovery Coverage | % of APIs with documentation | > 95% |
-| Average Risk Score | Mean risk score across all APIs | < 25 |
-| Critical Findings | Number of critical-risk APIs | 0 |
-| Shadow API Count | Undocumented/unmanaged APIs | 0 |
-| Authentication Coverage | % of APIs with auth controls | 100% |
-| TLS Coverage | % of APIs using HTTPS | 100% |
-| Policy Compliance | % of APIs meeting all policies | > 90% |
-| Mean Time to Remediate | Average days to fix findings | < 7 days |
+| Metric | Target | Action if missed |
+|--------|--------|-----------------|
+| API Discovery Coverage (documented %) | > 95% | Audit gateway logs for undocumented routes |
+| Average Risk Score | < 25 | Triage high-scoring endpoints immediately |
+| Critical-risk APIs | 0 | Immediate remediation SLA |
+| Shadow API Count | 0 | Investigate, document, or decommission |
+| Authentication Coverage | 100% | Block deployment until fixed |
+| TLS Coverage | 100% | Block deployment until fixed |
+| Policy Compliance Rate | > 90% | Weekly compliance sprint |
+| Mean Time to Remediate (MTTR) | < 7 days | Escalate to engineering lead |
 
-## References
+### 4. CI/CD Integration — Shift-Left API Inventory
 
-- OX Security ASPM Guide 2025: https://www.ox.security/blog/application-security-posture-management-aspm/
-- IBM ASPM Overview: https://www.ibm.com/think/topics/aspm
-- StackHawk Best ASPM Tools: https://www.stackhawk.com/blog/best-aspm-tools/
-- AppSentinels API Security Posture Management: https://appsentinels.ai/blog/api-security-posture-management-from-reactive-protection-to-continuous-governance/
-- Palo Alto Networks ASPM: https://www.paloaltonetworks.com/cyberpedia/aspm-application-security-posture-management
+Prevent shadow APIs by registering every endpoint at deploy time:
+
+```python
+# deploy_hook.py — run as part of your deployment pipeline
+import os, requests
+
+POSTURE_API = os.environ["POSTURE_API_URL"]
+SERVICE     = os.environ["SERVICE_NAME"]
+ENV         = os.environ["DEPLOY_ENV"]   # staging | production
+
+def register_endpoints_from_openapi(spec_path: str):
+    import yaml
+    with open(spec_path) as f:
+        spec = yaml.safe_load(f)
+    for path, methods in spec.get("paths", {}).items():
+        for method in methods:
+            if method.lower() in ("get","post","put","patch","delete"):
+                requests.post(f"{POSTURE_API}/register", json={
+                    "method":         method.upper(),
+                    "path":           path,
+                    "service":        SERVICE,
+                    "classification": "external" if ENV == "production" else "internal",
+                    "documented":     True,
+                    "owner":          os.environ.get("TEAM_NAME"),
+                })
+
+if __name__ == "__main__":
+    register_endpoints_from_openapi("openapi.yaml")
+```
+
+## Output Format
+
+```
+## API Security Posture Report
+
+Date: 2026-04-23  |  Total APIs: 342  |  Avg Risk Score: 31.4
+
+Risk Distribution:
+  CRITICAL: 4   HIGH: 28   MEDIUM: 89   LOW: 221
+
+Top Risks:
+  1. POST /api/v1/internal/admin/reset       service=auth-svc     score=92  [SHADOW, no auth, no TLS]
+  2. GET  /api/v2/users/export               service=user-svc     score=88  [EXTERNAL, no rate limit]
+  3. GET  /api/v1/webhooks/debug             service=notify-svc   score=81  [DEPRECATED, no sunset header]
+
+Policy Violations:
+  require-authentication : 4 endpoints
+  rate-limiting-required : 12 endpoints
+  openapi-required       : 19 endpoints
+  no-wildcard-cors       : 3 endpoints
+
+Action Items (this sprint):
+  P0 — fix missing auth on 4 shadow endpoints (block deployment)
+  P1 — add rate limiting to /api/v2/users/export
+  P1 — document 19 undocumented external endpoints
+  P2 — replace wildcard CORS on 3 endpoints with explicit allowlists
+```

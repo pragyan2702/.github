@@ -82,11 +82,3 @@ Open Copilot Chat (`Cmd+Shift+I`) → click the agent picker → select **`verte
 - Access to `VertexInc/vertex-knowledge-bases` on GitHub
 - Snyk account with an API token
 
----
-
-## Attribution
-
-API security skills in `skills/api-security/` are adapted from
-[mukul975/Anthropic-Cybersecurity-Skills](https://github.com/mukul975/Anthropic-Cybersecurity-Skills)
-by **mahipal**, licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
-Files are pinned locally to eliminate runtime supply-chain dependency on an external repository.
